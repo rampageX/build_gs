@@ -140,21 +140,23 @@ jobs:
           $date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
           $ffmpegPkg = (& "$env:VCPKG_ROOT\vcpkg.exe" list | Select-String "^ffmpeg").ToString()
 
-          @"
-grav1synth Windows x64 community build
-=======================================
-Source             : https://github.com/rust-av/grav1synth
-grav1synth commit  : $commit
-Built              : $date
-Runner             : GitHub Actions windows-2022
-Rust               : $(rustc --version)
-FFmpeg             : $ffmpegPkg
-ffmpeg-the-third   : 6.0.0
+          $buildInfo = @(
+            "grav1synth Windows x64 community build"
+            "======================================="
+            "Source             : https://github.com/rust-av/grav1synth"
+            "grav1synth commit  : $commit"
+            "Built              : $date"
+            "Runner             : GitHub Actions windows-2022"
+            "Rust               : $(rustc --version)"
+            "FFmpeg             : $ffmpegPkg"
+            "ffmpeg-the-third   : 6.0.0"
+            ""
+            "NOTE:"
+            "The upstream grav1synth Cargo.toml currently requests ffmpeg-the-third 5.0.0."
+            "This build patches that dependency to 6.0.0 for newer FFmpeg API compatibility."
+          )
 
-NOTE:
-The upstream grav1synth Cargo.toml currently requests ffmpeg-the-third 5.0.0.
-This build patches that dependency to 6.0.0 for newer FFmpeg API compatibility.
-"@ | Set-Content -Path (Join-Path $dist "BUILD_INFO.txt") -Encoding utf8
+          $buildInfo | Set-Content -Path (Join-Path $dist "BUILD_INFO.txt") -Encoding utf8
 
           Get-FileHash (Join-Path $dist "grav1synth.exe") -Algorithm SHA256 |
             Format-List |
