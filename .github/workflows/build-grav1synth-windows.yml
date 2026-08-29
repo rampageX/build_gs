@@ -1,4 +1,4 @@
-name: Build grav1synth Windows x64
+name: Build grav1synth Windows x64 v2
 
 on:
   workflow_dispatch:
@@ -17,6 +17,7 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/rust-av/grav1synth.git grav1synth
           Set-Location grav1synth
+          Write-Host "grav1synth commit:"
           git rev-parse HEAD
           git log -1 --oneline
 
@@ -27,6 +28,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: grav1synth -> target
+          shared-key: grav1synth-windows-v2
 
       - name: Prepare LLVM and vcpkg environment
         shell: pwsh
@@ -44,28 +46,14 @@ jobs:
           "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "VCPKGRS_DYNAMIC=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          $llvmCandidates = @(
-            "C:\Program Files\LLVM\bin",
-            "C:\Program Files\LLVM\lib"
-          )
-
-          $libclangPath = $null
-          foreach ($p in $llvmCandidates) {
-            if (Test-Path (Join-Path $p "libclang.dll")) {
-              $libclangPath = $p
-              break
-            }
-          }
-
-          if (-not $libclangPath) {
-            Write-Host "libclang.dll was not found in the normal runner location."
-            Write-Host "Installing LLVM with Chocolatey..."
+          $libclangPath = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path (Join-Path $libclangPath "libclang.dll"))) {
+            Write-Host "Installing LLVM..."
             choco install llvm -y --no-progress
-            $libclangPath = "C:\Program Files\LLVM\bin"
           }
 
           if (-not (Test-Path (Join-Path $libclangPath "libclang.dll"))) {
-            throw "libclang.dll still not found."
+            throw "libclang.dll not found."
           }
 
           "LIBCLANG_PATH=$libclangPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -81,6 +69,38 @@ jobs:
             throw "vcpkg FFmpeg installation failed."
           }
 
+          Write-Host ""
+          Write-Host "Installed FFmpeg package:"
+          & "$env:VCPKG_ROOT\vcpkg.exe" list | Select-String "^ffmpeg"
+
+      - name: Upgrade Rust FFmpeg wrapper for newer FFmpeg API
+        shell: pwsh
+        working-directory: grav1synth
+        run: |
+          Write-Host "Original FFmpeg dependency:"
+          Select-String -Path Cargo.toml -Pattern 'ffmpeg-the-third'
+
+          $cargo = Get-Content Cargo.toml -Raw
+
+          # grav1synth currently requests ffmpeg-the-third 5.0.0.
+          # Version 6.0.0 adds FFmpeg 9 compatibility and still supports 5.1-8.1.
+          $cargo = $cargo -replace 'version = "5\.0\.0"([\s\S]*?package = "ffmpeg-the-third")', 'version = "6.0.0"$1'
+
+          Set-Content Cargo.toml $cargo -Encoding utf8
+
+          Write-Host ""
+          Write-Host "Patched FFmpeg dependency:"
+          Select-String -Path Cargo.toml -Pattern 'ffmpeg-the-third'
+
+          cargo update -p ffmpeg-the-third --precise 6.0.0
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to update ffmpeg-the-third to 6.0.0."
+          }
+
+          Write-Host ""
+          Write-Host "Resolved FFmpeg Rust crates:"
+          cargo tree | Select-String "ffmpeg"
+
       - name: Build grav1synth Release
         shell: pwsh
         working-directory: grav1synth
@@ -88,11 +108,7 @@ jobs:
           rustc --version
           cargo --version
 
-          if (Test-Path "Cargo.lock") {
-            cargo build --release --locked
-          } else {
-            cargo build --release
-          }
+          cargo build --release
 
           if ($LASTEXITCODE -ne 0) {
             throw "cargo build failed."
@@ -111,9 +127,8 @@ jobs:
           Copy-Item "grav1synth\target\release\grav1synth.exe" $dist
           Copy-Item "grav1synth\LICENSE" $dist -ErrorAction SilentlyContinue
           Copy-Item "grav1synth\README.md" $dist -ErrorAction SilentlyContinue
+          Copy-Item "grav1synth\CHANGELOG.md" $dist -ErrorAction SilentlyContinue
 
-          # grav1synth dynamically links against the FFmpeg libraries found
-          # through vcpkg. Copy the vcpkg runtime DLL directory alongside it.
           $vcpkgBin = Join-Path $env:VCPKG_ROOT "installed\x64-windows\bin"
           if (-not (Test-Path $vcpkgBin)) {
             throw "vcpkg runtime bin directory not found: $vcpkgBin"
@@ -122,20 +137,24 @@ jobs:
           Copy-Item "$vcpkgBin\*.dll" $dist -Force
 
           $commit = (git -C grav1synth rev-parse HEAD).Trim()
-          $date = Get-Date -Format "yyyy-MM-dd HH:mm:ss 'UTC'"
-          @"
-          grav1synth Windows x64 community build
-          =======================================
-          Source : https://github.com/rust-av/grav1synth
-          Commit : $commit
-          Built  : $date
-          Runner : GitHub Actions windows-2022
-          Rust   : $(rustc --version)
-          FFmpeg : vcpkg ffmpeg:x64-windows
+          $date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
+          $ffmpegPkg = (& "$env:VCPKG_ROOT\vcpkg.exe" list | Select-String "^ffmpeg").ToString()
 
-          This is an unsigned personal build produced from the upstream source.
-          Keep grav1synth.exe and the DLL files in the same folder.
-          "@ | Set-Content -Path (Join-Path $dist "BUILD_INFO.txt") -Encoding utf8
+          @"
+grav1synth Windows x64 community build
+=======================================
+Source             : https://github.com/rust-av/grav1synth
+grav1synth commit  : $commit
+Built              : $date
+Runner             : GitHub Actions windows-2022
+Rust               : $(rustc --version)
+FFmpeg             : $ffmpegPkg
+ffmpeg-the-third   : 6.0.0
+
+NOTE:
+The upstream grav1synth Cargo.toml currently requests ffmpeg-the-third 5.0.0.
+This build patches that dependency to 6.0.0 for newer FFmpeg API compatibility.
+"@ | Set-Content -Path (Join-Path $dist "BUILD_INFO.txt") -Encoding utf8
 
           Get-FileHash (Join-Path $dist "grav1synth.exe") -Algorithm SHA256 |
             Format-List |
@@ -145,7 +164,10 @@ jobs:
         shell: pwsh
         run: |
           Set-Location "grav1synth-windows-x64"
+
+          Write-Host "Testing grav1synth.exe --help..."
           .\grav1synth.exe --help
+
           if ($LASTEXITCODE -ne 0) {
             throw "Packaged grav1synth.exe failed the --help test."
           }
@@ -166,7 +188,7 @@ jobs:
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: grav1synth-windows-x64
+          name: grav1synth-windows-x64-v2
           path: |
             grav1synth-windows-x64.zip
             grav1synth-windows-x64.zip.sha256.txt
